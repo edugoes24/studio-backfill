@@ -1,17 +1,15 @@
-"""Drive resolver — classifies a Studio row's `utilitiesLink` into one of 8
-cases (A / B / C / D1 / D2 / D3 / E / F) and downloads the transcript.
+"""Drive resolver — classifies a Studio row's transcript/video links into one
+of 8 cases (A / B / C / D1 / D2 / D3 / E / F) and downloads the transcript.
 
-See plan section "Los casos del Drive". Empirical distribution from 5,996 rows:
-  A=97.75%  D2=1.08%  B=0.48%  D3=0.33%  C=0.18%  F=0.12%  D1=0.03%  E=0%
+Post-migration (studio_results_final.xlsx, 9,386 rows):
+  A=65.22%  Sin dato(E)=33.20%  D2=0.82%  B=0.30%  D3=0.21%  C=0.12%
+  F=0.10%   D1=0.02%
 """
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass
-from typing import Any
-from urllib.parse import urlparse
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -58,22 +56,20 @@ class ResolveResult:
     case: str                # "A" | "B" | "C" | "D1" | "D2" | "D3" | "E" | "F"
     file_id: str | None      # None for E, F, and folders w/o valid content
     mime: str | None         # None for E, F
-    transcription_url: str   # Original URL (empty for E)
+    transcript_url: str      # Original URL (empty or "Sin dato" for E)
     folder_id: str | None    # Only for C / D1
     sub_variant: str | None  # "F_sheet" | "F_redirect" | "F_other" — F only
     diagnostic: str | None   # Human-readable skip reason if applicable
 
 
-def _parse_utilities_link(raw: Any) -> dict:
-    """Returns a dict (possibly empty) from the Excel cell value."""
-    if raw is None or raw == "":
-        return {}
-    if isinstance(raw, dict):
-        return raw
-    try:
-        return json.loads(raw)
-    except (TypeError, ValueError):
-        return {}
+# Studio uses the literal string "Sin dato" for missing links. Treat as empty.
+def _normalize_link(value) -> str:
+    if value is None:
+        return ""
+    s = str(value).strip()
+    if s.lower() == "sin dato":
+        return ""
+    return s
 
 
 def _identify_url(url: str) -> tuple[str, str | None]:
@@ -96,60 +92,66 @@ def _identify_url(url: str) -> tuple[str, str | None]:
     return ("F_other", None)
 
 
-def classify(utilities_link: Any, drive=None) -> ResolveResult:
-    """Pure classification + optional folder listing if drive is provided.
+def classify(
+    transcript_link: str | None,
+    video_link: str | None = None,
+    drive=None,
+) -> ResolveResult:
+    """Classify the transcript/video link pair into one of the 8 cases.
 
-    Without `drive` (a Drive API client), classification stops before the
-    listing step required for C / D1. Pass `drive` to get the actual file_id
-    inside the folder.
+    Pure classification + optional folder listing if a Drive client is provided.
+    Without `drive`, classification stops before the listing step required for
+    C / D1 (file_id will be None). Pass `drive` to peek into the folder.
+
+    Studio sometimes stores the literal "Sin dato" in either column when the
+    file is missing; this is normalized to empty and falls into Case E.
     """
-    data = _parse_utilities_link(utilities_link)
-    transcription = (data.get("transcription") or "").strip()
-    video = (data.get("video") or "").strip()
+    transcript = _normalize_link(transcript_link)
+    video = _normalize_link(video_link)
 
-    # Case E — no transcription field or empty
-    if not transcription:
+    # Case E — no transcript link
+    if not transcript:
+        raw = (transcript_link or "").strip()
         return ResolveResult(
             case="E", file_id=None, mime=None,
-            transcription_url="", folder_id=None, sub_variant=None,
-            diagnostic="utilitiesLink missing 'transcription'",
+            transcript_url=raw, folder_id=None, sub_variant=None,
+            diagnostic="transcript_link is empty or 'Sin dato'",
         )
 
-    kind_t, id_t = _identify_url(transcription)
-    kind_v, id_v = _identify_url(video)
-    same = (transcription == video) and bool(video)
+    kind_t, id_t = _identify_url(transcript)
+    same = (transcript == video) and bool(video)
 
-    # Case F — unsupported format on transcription
+    # Case F — unsupported format on transcript
     if kind_t.startswith("F_"):
         return ResolveResult(
             case="F", file_id=None, mime=None,
-            transcription_url=transcription, folder_id=None,
+            transcript_url=transcript, folder_id=None,
             sub_variant=kind_t,
-            diagnostic=f"transcription host/path not supported: {kind_t}",
+            diagnostic=f"transcript host/path not supported: {kind_t}",
         )
 
-    # Case A — Google Doc directly
+    # Case A — Google Doc directly (transcript != video)
     if kind_t == "doc" and not same:
         return ResolveResult(
             case="A", file_id=id_t, mime=MIME_GOOGLE_DOC,
-            transcription_url=transcription, folder_id=None,
+            transcript_url=transcript, folder_id=None,
             sub_variant=None, diagnostic=None,
         )
 
-    # Case D3 — Doc where video == transcription (same Doc URL in both)
+    # Case D3 — Doc where video == transcript (same URL in both)
     if kind_t == "doc" and same:
         return ResolveResult(
             case="D3", file_id=id_t, mime=MIME_GOOGLE_DOC,
-            transcription_url=transcription, folder_id=None,
+            transcript_url=transcript, folder_id=None,
             sub_variant=None, diagnostic=None,
         )
 
     # Case B — drive/file/<id>, different from video
     if kind_t == "file" and not same:
-        # Mime is undetermined until Drive API call; defer to download_as_docx
+        # Mime undetermined; caller must probe via Drive API.
         return ResolveResult(
             case="B", file_id=id_t, mime=None,
-            transcription_url=transcription, folder_id=None,
+            transcript_url=transcript, folder_id=None,
             sub_variant=None, diagnostic=None,
         )
 
@@ -157,17 +159,17 @@ def classify(utilities_link: Any, drive=None) -> ResolveResult:
     if kind_t == "file" and same:
         return ResolveResult(
             case="D2", file_id=id_t, mime=None,
-            transcription_url=transcription, folder_id=None,
+            transcript_url=transcript, folder_id=None,
             sub_variant=None, diagnostic=None,
         )
 
-    # Cases C and D1 — folder. Need to list contents to find the Doc/.docx.
+    # Cases C and D1 — folder. Peek inside if drive client provided.
     if kind_t == "folder":
         case = "D1" if same else "C"
         if drive is None:
             return ResolveResult(
                 case=case, file_id=None, mime=None,
-                transcription_url=transcription, folder_id=id_t,
+                transcript_url=transcript, folder_id=id_t,
                 sub_variant=None,
                 diagnostic="classification only — drive client not provided",
             )
@@ -175,22 +177,22 @@ def classify(utilities_link: Any, drive=None) -> ResolveResult:
         if picked is None:
             return ResolveResult(
                 case=case, file_id=None, mime=None,
-                transcription_url=transcription, folder_id=id_t,
+                transcript_url=transcript, folder_id=id_t,
                 sub_variant=None,
-                diagnostic=f"folder {id_t} has no Doc/.docx child",
+                diagnostic=f"folder {id_t} has no Doc/.docx/.txt child",
             )
         return ResolveResult(
             case=case, file_id=picked[0], mime=picked[1],
-            transcription_url=transcription, folder_id=id_t,
+            transcript_url=transcript, folder_id=id_t,
             sub_variant=None, diagnostic=None,
         )
 
-    # Fallback (should be unreachable given the F catch-all)
+    # Fallback (unreachable given the F catch-all)
     return ResolveResult(
         case="F", file_id=None, mime=None,
-        transcription_url=transcription, folder_id=None,
+        transcript_url=transcript, folder_id=None,
         sub_variant="F_other",
-        diagnostic=f"unrecognized transcription URL: {transcription}",
+        diagnostic=f"unrecognized transcript URL: {transcript}",
     )
 
 

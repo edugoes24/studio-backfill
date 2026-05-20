@@ -18,7 +18,7 @@ from typing import Iterable
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS rows (
-    excel_id            INTEGER PRIMARY KEY,
+    row_position            INTEGER PRIMARY KEY,
     event_id            TEXT UNIQUE NOT NULL,
     drive_case          TEXT,
     transcript_file_id  TEXT,
@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS source_metadata (
 
 @dataclass
 class Row:
-    excel_id: int
+    row_position: int
     event_id: str
     drive_case: str | None
     transcript_file_id: str | None
@@ -134,14 +134,14 @@ class StateStore:
             )
 
     # ── Row CRUD ───────────────────────────────────────────────────────────
-    def upsert_pending(self, excel_id: int, excel_row: dict) -> None:
+    def upsert_pending(self, row_position: int, excel_row: dict) -> None:
         """Insert a row in 'pending' state if not present. Idempotent."""
-        event_id = f"studio-{excel_id}"
+        event_id = f"studio-row-{row_position}"
         with self._tx():
             self._conn.execute(
-                "INSERT OR IGNORE INTO rows (excel_id, event_id, state, excel_row_json) "
+                "INSERT OR IGNORE INTO rows (row_position, event_id, state, excel_row_json) "
                 "VALUES (?, ?, 'pending', ?)",
-                (excel_id, event_id, json.dumps(excel_row, default=str)),
+                (row_position, event_id, json.dumps(excel_row, default=str)),
             )
 
     def update(self, event_id: str, **fields) -> None:
@@ -186,7 +186,7 @@ class StateStore:
         if max_attempts is not None:
             sql += " AND attempts < ?"
             params.append(max_attempts)
-        sql += " ORDER BY excel_id"
+        sql += " ORDER BY row_position"
         return [Row(**dict(r)) for r in self._conn.execute(sql, params).fetchall()]
 
     def mark_timeout_failures(
@@ -212,7 +212,7 @@ class StateStore:
 
     def failures_listing(self) -> list[Row]:
         rows = self._conn.execute(
-            "SELECT * FROM rows WHERE state LIKE 'failed_%' ORDER BY excel_id"
+            "SELECT * FROM rows WHERE state LIKE 'failed_%' ORDER BY row_position"
         ).fetchall()
         return [Row(**dict(r)) for r in rows]
 

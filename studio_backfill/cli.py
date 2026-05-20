@@ -51,18 +51,28 @@ def _ensure_source_registered(state: StateStore, settings: Settings) -> int:
 
 # ─── find-pilot-rows ──────────────────────────────────────────────────────
 def cmd_find_pilot_rows(args, settings: Settings, state: StateStore) -> int:
-    """Print a sample of rows per case + dump folder contents for C/D1/F."""
+    """Print case distribution + sample of row_positions per case.
+
+    For C/D1 also peeks into the Drive folders to validate content uniformity.
+    """
     counts: Counter[str] = Counter()
-    samples: dict[str, list[dict]] = {c: [] for c in ("A", "B", "C", "D1", "D2", "D3", "F")}
+    samples: dict[str, list[dict]] = {c: [] for c in ("A", "B", "C", "D1", "D2", "D3", "E", "F")}
     max_per_case = args.sample_size
 
     drive = drive_reader.make_drive_client(settings.sa_key_path)
     for row in excel_io.read_rows(settings.excel_path):
-        utilities = excel_io.parse_utilities(row)
-        r = drive_reader.classify(utilities, drive=None)  # no folder peek, fast
+        r = drive_reader.classify(
+            transcript_link=row.get("transcriptLink"),
+            video_link=row.get("videoLink"),
+            drive=None,  # no folder peek for speed
+        )
         counts[r.case] += 1
         if r.case in samples and len(samples[r.case]) < max_per_case:
-            samples[r.case].append({"id": row["id"], "url": r.transcription_url, "sub_variant": r.sub_variant})
+            samples[r.case].append({
+                "row_position": row["_row_position"],
+                "url": r.transcript_url,
+                "sub_variant": r.sub_variant,
+            })
 
     print("=" * 70)
     print("Counts per case:")
@@ -70,12 +80,13 @@ def cmd_find_pilot_rows(args, settings: Settings, state: StateStore) -> int:
         print(f"  {case:5}  {n}")
     print()
 
-    for case in ("C", "D1", "F"):
-        print(f"\n── Samples for case {case} (max {max_per_case}) ──")
+    for case in ("A", "B", "C", "D1", "D2", "D3", "F"):
+        if not samples[case]:
+            continue
+        print(f"\n-- Samples for case {case} (max {max_per_case}) --")
         for s in samples[case]:
-            print(f"  id={s['id']}  url={s['url']}  sub_variant={s['sub_variant']}")
+            print(f"  row_position={s['row_position']}  url={s['url'][:80]}  sub_variant={s['sub_variant']}")
             if case in ("C", "D1"):
-                # Peek into the folder
                 folder_match = drive_reader._RE_FOLDER.match(s["url"])
                 if folder_match:
                     folder_id = folder_match.group(1)
@@ -91,6 +102,16 @@ def cmd_find_pilot_rows(args, settings: Settings, state: StateStore) -> int:
                             print(f"      - {c.get('name')!r}  ({c.get('mimeType')})")
                     except Exception as e:
                         print(f"      [could not list folder: {e}]")
+
+    # Build a suggested pilot command
+    suggestion = []
+    for case in ("A", "B", "C", "D1", "D2", "D3", "F", "E"):
+        if samples[case]:
+            suggestion.append(str(samples[case][0]["row_position"]))
+    if suggestion:
+        print()
+        print("Suggested pilot command:")
+        print(f"  python -m studio_backfill.cli pilot --rows {','.join(suggestion)}")
     return 0
 
 
@@ -111,14 +132,16 @@ def cmd_pilot(args, settings: Settings, state: StateStore) -> int:
     elif args.all:
         excel_rows = list(excel_io.read_rows(settings.excel_path))
     elif args.rows:
-        wanted = {int(x.strip()) for x in args.rows.split(",") if x.strip()}
-        excel_rows = [r for r in excel_io.read_rows(settings.excel_path) if int(r["id"]) in wanted]
-        # Handle synthetic rows (id >= 99000 don't exist in Excel; expect manual injection)
-        seen_ids = {int(r["id"]) for r in excel_rows}
-        for synth_id in wanted - seen_ids:
-            log.warning("synthetic id %d not in Excel — skipping (would need a manual fixture)", synth_id)
+        wanted_positions = {int(x.strip()) for x in args.rows.split(",") if x.strip()}
+        excel_rows = [
+            r for r in excel_io.read_rows(settings.excel_path)
+            if int(r["_row_position"]) in wanted_positions
+        ]
+        seen = {int(r["_row_position"]) for r in excel_rows}
+        for missing in wanted_positions - seen:
+            log.warning("row_position %d not in Excel — skipping", missing)
     else:
-        log.error("specify --rows IDS, --all, or --retry-failed")
+        log.error("specify --rows ROW_POSITIONS, --all, or --retry-failed")
         return 2
 
     log.info("phase 1: %d rows to process at %.2f RPS", len(excel_rows), settings.webhook_rps)
@@ -147,28 +170,26 @@ def cmd_write_excel(args, settings: Settings, state: StateStore) -> int:
     out_path = args.out or _default_output_path(settings.excel_path)
 
     rows_with_links: dict[int, dict] = {}
-    for row in state.fetch(states=[]):  # noop — we want all rows
-        pass
 
     # Fetch ALL rows (not filtered by state)
     all_rows = state._conn.execute("SELECT * FROM rows").fetchall()
     for r in all_rows:
-        excel_id = r["excel_id"]
+        position = r["row_position"]
         status = r["state"]
         if status == "completed":
-            rows_with_links[excel_id] = {
+            rows_with_links[position] = {
                 "event_id_xai": r["event_id"],
                 "pdf_drive_link": r["pdf_drive_link"] or "",
                 "backfill_status": "completed",
             }
         elif status.startswith("skipped_"):
-            rows_with_links[excel_id] = {
+            rows_with_links[position] = {
                 "event_id_xai": r["event_id"],
                 "pdf_drive_link": "",
                 "backfill_status": status,
             }
         else:
-            rows_with_links[excel_id] = {
+            rows_with_links[position] = {
                 "event_id_xai": r["event_id"],
                 "pdf_drive_link": "",
                 "backfill_status": f"{status}: {(r['last_error'] or '')[:200]}",
@@ -212,7 +233,7 @@ def cmd_inspect(args, settings: Settings, state: StateStore) -> int:
         print(f"event_id {args.event_id} not found")
         return 1
     print(json.dumps({
-        "excel_id": row.excel_id,
+        "row_position": row.row_position,
         "event_id": row.event_id,
         "drive_case": row.drive_case,
         "transcript_file_id": row.transcript_file_id,
@@ -260,7 +281,7 @@ def main(argv: list[str] | None = None) -> int:
 
     sp_pilot = sub.add_parser("pilot")
     g = sp_pilot.add_mutually_exclusive_group()
-    g.add_argument("--rows", type=str, help="comma-separated excel_ids")
+    g.add_argument("--rows", type=str, help="comma-separated row positions (1-indexed)")
     g.add_argument("--all", action="store_true")
     g.add_argument("--retry-failed", action="store_true")
     sp_pilot.set_defaults(func=cmd_pilot)

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
+import unicodedata
+from datetime import datetime, timezone
 from typing import Iterable
 
-from . import drive_reader, excel_io
+from . import drive_reader
 from .config import Settings
 from .drive_writer import DriveWriter
 from .gcs_uploader import GcsUploader
@@ -15,6 +18,19 @@ from .state import StateStore
 from .webhook_client import WebhookClient, WebhookError, build_payload
 
 log = logging.getLogger("studio_backfill.pipeline")
+
+
+def slug(name: str | None) -> str:
+    """Normalize a free-form name to an ASCII-safe slug.
+
+    "LÓPEZ VELASCO, CARLOS MAURICIO" -> "LOPEZ-VELASCO-CARLOS-MAURICIO"
+    Returns "UNKNOWN" if the input is empty.
+    """
+    if not name:
+        return "UNKNOWN"
+    s = unicodedata.normalize("NFKD", str(name)).encode("ascii", "ignore").decode("ascii")
+    s = re.sub(r"[^A-Za-z0-9]+", "-", s).strip("-").upper()
+    return s or "UNKNOWN"
 
 
 class Pipeline:
@@ -35,32 +51,39 @@ class Pipeline:
 
     # ── Fase 1 ─────────────────────────────────────────────────────────────
     def submit_row(self, state: StateStore, excel_row: dict) -> None:
-        """Execute Phase 1 for a single row. Idempotent: skips already-submitted."""
-        excel_id = int(excel_row["id"])
-        event_id = f"studio-{excel_id}"
-        state.upsert_pending(excel_id, excel_row)
+        """Execute Phase 1 for a single row. Idempotent: skips already-submitted.
+
+        Requires `excel_row["_row_position"]` to be set (excel_io.read_rows
+        attaches it automatically).
+        """
+        row_position = int(excel_row["_row_position"])
+        event_id = f"studio-row-{row_position}"
+        state.upsert_pending(row_position, excel_row)
 
         if state.is_completed_or_submitted(event_id):
             log.info("skip already-submitted event_id=%s", event_id)
             return
 
         try:
-            utilities = excel_io.parse_utilities(excel_row)
-            r = drive_reader.classify(utilities, drive=self.drive)
+            r = drive_reader.classify(
+                transcript_link=excel_row.get("transcriptLink"),
+                video_link=excel_row.get("videoLink"),
+                drive=self.drive,
+            )
 
             if r.case == "E":
-                state.update(event_id, state="skipped_empty_link",
+                state.update(event_id, state="skipped_no_link",
                              last_error=r.diagnostic)
                 return
             if r.case == "F":
                 state.update(
                     event_id, state="skipped_unsupported_format",
-                    last_error=f"[{r.sub_variant}] transcription no soportado: {r.transcription_url}",
+                    last_error=f"[{r.sub_variant}] transcript no soportado: {r.transcript_url}",
                 )
                 return
             if r.case in ("C", "D1") and r.file_id is None:
                 state.update(event_id, state="skipped_no_transcript_in_folder",
-                             last_error=f"carpeta {r.folder_id} no contiene Doc ni .docx")
+                             last_error=f"carpeta {r.folder_id} no contiene Doc/.docx/.txt")
                 return
 
             # Case B / D2 — mime unknown up front; resolve now
@@ -68,19 +91,14 @@ class Pipeline:
             if r.case in ("B", "D2") and mime is None:
                 mime = drive_reader.probe_mime(self.drive, r.file_id)
 
-            if r.case == "D2" and mime == drive_reader.MIME_MP4:
+            if r.case in ("B", "D2") and mime == drive_reader.MIME_MP4:
                 state.update(event_id, state="skipped_no_transcript",
-                             last_error="file/d único es .mp4, no hay transcript")
-                return
-
-            if r.case == "B" and mime == drive_reader.MIME_MP4:
-                state.update(event_id, state="skipped_no_transcript",
-                             last_error="file/d directo es .mp4, no hay transcript")
+                             last_error=f"file/d is video/mp4 (case {r.case}), no transcript")
                 return
 
             state.update(event_id, drive_case=r.case, transcript_file_id=r.file_id)
 
-            # Download from Drive (returns bytes + content_type + extension)
+            # Download from Drive
             try:
                 bytes_, content_type, extension = drive_reader.download_transcript(
                     self.drive, r.file_id, mime
@@ -102,7 +120,7 @@ class Pipeline:
             state.update(event_id, transcript_gcs_uri=gcs_uri, state="transcript_uploaded")
 
             # POST webhook
-            payload = self._build_payload(excel_row, signed_url, event_id)
+            payload = self._build_payload(excel_row, row_position, signed_url)
             try:
                 resp = self.webhook.post(payload)
             except WebhookError as e:
@@ -115,7 +133,6 @@ class Pipeline:
                 state.increment_attempts(event_id)
                 return
 
-            from datetime import datetime, timezone
             state.update(
                 event_id,
                 webhook_message_id=str(resp.get("message_id", "")),
@@ -131,7 +148,6 @@ class Pipeline:
         delay = 1.0 / max(self.settings.webhook_rps, 0.0001)
         last = 0.0
         for row in excel_rows:
-            # Throttle
             now = time.monotonic()
             wait = delay - (now - last)
             if wait > 0:
@@ -139,23 +155,30 @@ class Pipeline:
             last = time.monotonic()
             self.submit_row(state, row)
 
-    def _build_payload(self, excel_row: dict, signed_url: str, event_id: str) -> dict:
-        payload = excel_io.parse_payload(excel_row)
+    def _build_payload(self, excel_row: dict, row_position: int, signed_url: str) -> dict:
+        """Build the webhook payload from the new flat Excel columns.
+
+        - event_id from row_position (M-1)
+        - codes from slugified names + infrastructureCode (M-4)
+        - recorded_at = UTC now (M-2)
+        - grade/section/shift/subject directly from the Excel (M-6)
+        """
         return build_payload(
-            event_id=event_id,
-            teacher_code=f"studio-teacher-{excel_row['teacherId']}",
-            coach_code=f"studio-tutor-{excel_row['tutorId']}",
-            school_code=f"studio-school-{excel_row['schoolCode']}",
-            grade=self.settings.default_grade,
-            subject=payload.get("subject", "No informado"),
-            recorded_at=str(excel_row.get("submittedAt", "")),
+            event_id=f"studio-row-{row_position}",
+            teacher_code=f"studio-teacher-{slug(excel_row.get('teacher'))}",
+            coach_code=f"studio-tutor-{slug(excel_row.get('coach'))}",
+            school_code=f"studio-school-{excel_row.get('infrastructureCode')}",
+            grade=str(excel_row.get("grade") or self.settings.default_grade),
+            subject=str(excel_row.get("subject") or "No informado"),
+            recorded_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             signed_url=signed_url,
+            section=(str(excel_row["section"]) if excel_row.get("section") else None),
+            shift=(str(excel_row["shift"]) if excel_row.get("shift") else None),
         )
 
     # ── Fase 2 ─────────────────────────────────────────────────────────────
     def collect_once(self, state: StateStore) -> int:
         """Single pass of Phase 2. Returns count of rows that became 'completed'."""
-        # Mark timeouts before polling
         moved = state.mark_timeout_failures(
             state_filter="submitted",
             older_than_hours=self.settings.pipeline_timeout_hours,
@@ -197,17 +220,14 @@ class Pipeline:
                 state.update(row.event_id, state="failed_pdf_analysis",
                              last_error=f"xAI terminal: {resp.json_body}")
             elif resp.status == 422:
-                # Still processing — keep as submitted, no attempts++
                 state.update(row.event_id, state="submitted")
             elif resp.status == 404:
                 state.update(row.event_id, state="failed_pdf_404",
                              last_error="not in BQ yet")
             elif resp.status == 429:
-                # Backoff politely, do NOT count as attempt
                 log.warning("429 from reports backend for %s — backoff", row.event_id)
                 time.sleep(30)
             else:
-                # 5xx, etc. — transient, count as attempt
                 state.update(row.event_id, state="failed_pdf_fetch",
                              last_error=f"HTTP {resp.status}: {resp.raw_text[:200]}")
                 state.increment_attempts(row.event_id)
@@ -219,7 +239,6 @@ class Pipeline:
         while True:
             n = self.collect_once(state)
             log.info("collect pass: %d completed this round", n)
-            # Are there still pending rows to poll?
             remaining = (
                 len(state.fetch(states=["submitted", "failed_pdf_404"]))
                 + len(state.fetch(states=["failed_pdf_fetch"], max_attempts=self.settings.max_attempts))

@@ -11,7 +11,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseUpload
 
-KEY_PATH = r"C:\Users\Eduardo Lopez\Documents\GitHub\studio_backfill\auditoria-clases-sa-key.json"
+KEY_PATH = "./auditoria-clases-sa-key.json"
 SHARED_DRIVE_ID = "0AO6wfjPBgovOUk9PVA"  # from the URL the user gave
 
 SCOPES = ["https://www.googleapis.com/auth/drive"]  # full scope for write test

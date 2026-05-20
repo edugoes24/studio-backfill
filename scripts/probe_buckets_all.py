@@ -11,7 +11,7 @@ from google.oauth2 import service_account
 from google.cloud import storage
 from google.api_core.exceptions import GoogleAPIError
 
-KEY_PATH = r"C:\Users\Eduardo Lopez\Documents\GitHub\studio_backfill\auditoria-clases-sa-key.json"
+KEY_PATH = "./auditoria-clases-sa-key.json"
 
 BUCKETS = [
     ("DEV", "videos-and-transcripts-bucket", "g-edu-room-mon-dev-prj-65cd"),

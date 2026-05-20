@@ -7,7 +7,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-KEY_PATH = r"C:\Users\Eduardo Lopez\Documents\GitHub\studio_backfill\auditoria-clases-sa-key.json"
+KEY_PATH = "./auditoria-clases-sa-key.json"
 
 # Sampled from the first rows of studio_results_20260518_1308.xlsx
 TARGETS = [

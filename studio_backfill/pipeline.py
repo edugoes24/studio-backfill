@@ -50,11 +50,12 @@ class Pipeline:
         self.drive_writer = DriveWriter(settings.sa_key_path, settings.shared_drive_id)
 
     # ── Fase 1 ─────────────────────────────────────────────────────────────
-    def submit_row(self, state: StateStore, excel_row: dict) -> None:
+    def submit_row(self, state: StateStore, excel_row: dict) -> bool:
         """Execute Phase 1 for a single row. Idempotent: skips already-submitted.
 
-        Requires `excel_row["_row_position"]` to be set (excel_io.read_rows
-        attaches it automatically).
+        Returns True if a webhook POST was actually attempted (success or fail),
+        False if the row skipped early (E/F/already-submitted/no-transcript).
+        submit_all uses this to throttle only on real webhook calls.
         """
         row_position = int(excel_row["_row_position"])
         event_id = f"studio-row-{row_position}"
@@ -62,7 +63,7 @@ class Pipeline:
 
         if state.is_completed_or_submitted(event_id):
             log.info("skip already-submitted event_id=%s", event_id)
-            return
+            return False
 
         try:
             r = drive_reader.classify(
@@ -74,17 +75,17 @@ class Pipeline:
             if r.case == "E":
                 state.update(event_id, state="skipped_no_link",
                              last_error=r.diagnostic)
-                return
+                return False
             if r.case == "F":
                 state.update(
                     event_id, state="skipped_unsupported_format",
                     last_error=f"[{r.sub_variant}] transcript no soportado: {r.transcript_url}",
                 )
-                return
+                return False
             if r.case in ("C", "D1") and r.file_id is None:
                 state.update(event_id, state="skipped_no_transcript_in_folder",
                              last_error=f"carpeta {r.folder_id} no contiene Doc/.docx/.txt")
-                return
+                return False
 
             # Case B / D2 — mime unknown up front; resolve now
             mime = r.mime
@@ -94,7 +95,7 @@ class Pipeline:
             if r.case in ("B", "D2") and mime == drive_reader.MIME_MP4:
                 state.update(event_id, state="skipped_no_transcript",
                              last_error=f"file/d is video/mp4 (case {r.case}), no transcript")
-                return
+                return False
 
             state.update(event_id, drive_case=r.case, transcript_file_id=r.file_id)
 
@@ -106,7 +107,7 @@ class Pipeline:
             except Exception as e:
                 state.update(event_id, state="failed_drive_read", last_error=str(e))
                 state.increment_attempts(event_id)
-                return
+                return False
 
             # Upload to GCS + signed URL
             try:
@@ -116,10 +117,10 @@ class Pipeline:
             except Exception as e:
                 state.update(event_id, state="failed_gcs_upload", last_error=str(e))
                 state.increment_attempts(event_id)
-                return
+                return False
             state.update(event_id, transcript_gcs_uri=gcs_uri, state="transcript_uploaded")
 
-            # POST webhook
+            # POST webhook (this is the only point where we hit external rate-limited resources)
             payload = self._build_payload(excel_row, row_position, signed_url)
             try:
                 resp = self.webhook.post(payload)
@@ -127,11 +128,11 @@ class Pipeline:
                 state.update(event_id, state="failed_webhook",
                              last_error=f"{e.status}: {e.body[:300]}")
                 state.increment_attempts(event_id)
-                return
+                return True  # attempted the POST; counts toward throttle
             except Exception as e:
                 state.update(event_id, state="failed_webhook", last_error=str(e))
                 state.increment_attempts(event_id)
-                return
+                return True
 
             state.update(
                 event_id,
@@ -139,21 +140,29 @@ class Pipeline:
                 webhook_submitted_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 state="submitted",
             )
+            return True
         except Exception as e:
             state.update(event_id, state="failed_phase1", last_error=str(e))
             state.increment_attempts(event_id)
+            return False  # unknown if webhook was attempted; conservative: don't throttle
 
     def submit_all(self, state: StateStore, excel_rows: Iterable[dict]) -> None:
-        """Run Phase 1 for all rows with throttle = WEBHOOK_RPS."""
+        """Run Phase 1 for all rows. Throttle applies ONLY to rows that hit
+        the webhook (skipped rows pass through instantly).
+        """
         delay = 1.0 / max(self.settings.webhook_rps, 0.0001)
-        last = 0.0
+        last_webhook = 0.0
         for row in excel_rows:
-            now = time.monotonic()
-            wait = delay - (now - last)
-            if wait > 0:
-                time.sleep(wait)
-            last = time.monotonic()
-            self.submit_row(state, row)
+            # Wait only if the previous iteration actually hit the webhook
+            # and not enough time has passed since.
+            if last_webhook > 0:
+                wait = delay - (time.monotonic() - last_webhook)
+                if wait > 0:
+                    time.sleep(wait)
+
+            did_post = self.submit_row(state, row)
+            if did_post:
+                last_webhook = time.monotonic()
 
     def _build_payload(self, excel_row: dict, row_position: int, signed_url: str) -> dict:
         """Build the webhook payload from the new flat Excel columns.

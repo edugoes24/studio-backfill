@@ -200,6 +200,139 @@ Después de tocar el `.env_backfill`, el siguiente comando lo lee automático
 
 ---
 
+## Queries útiles del lado xAI
+
+El sistema xAI tiene 2 capas de datos:
+- **Cloud SQL operacional** (`xai-dev-goes:us-central1:goes-staging-db`, DB `observability_app_db`) — donde el webhook hace inserts y donde podemos UPDATE-ar manualmente.
+- **BigQuery dataset** (`xai-dev-goes.conformed_education_obs_staging`) — donde el ETL promueve la data y de donde lee el backend de reportes para generar el PDF.
+
+Las dos se ven en distintas consolas:
+- Cloud SQL: `console.cloud.google.com/sql/instances/goes-staging-db` → Studio
+- BigQuery: `console.cloud.google.com/bigquery` con proyecto `xai-dev-goes`
+
+### Cloud SQL — diagnóstico operacional
+
+```sql
+-- 1) Estado de una sesión específica
+SELECT id, scheduling_app_event_id, school_code, teacher_code, coach_code,
+       grade, subject, pipeline_status, status, recorded_at, created_at
+FROM sessions
+WHERE scheduling_app_event_id = 'studio-row-4';
+
+-- 2) Resumen del progreso del batch en xAI
+SELECT pipeline_status, COUNT(*) AS n
+FROM sessions
+WHERE scheduling_app_event_id LIKE 'studio-row-%'
+GROUP BY pipeline_status
+ORDER BY n DESC;
+
+-- 3) Sesiones que fallaron en xAI
+SELECT scheduling_app_event_id, pipeline_status, error_message, updated_at
+FROM sessions
+WHERE scheduling_app_event_id LIKE 'studio-row-%'
+  AND (pipeline_status = 'failed' OR status = 'failed')
+ORDER BY updated_at DESC;
+
+-- 4) ¿Cuántos transcripts tenemos cargados en xAI por nuestro backfill?
+SELECT COUNT(*) AS total_studio_sessions
+FROM sessions
+WHERE scheduling_app_event_id LIKE 'studio-row-%';
+
+-- 5) Escuelas creadas por el backfill (con/sin nombre)
+SELECT id, code, name, department, district, created_at
+FROM schools
+WHERE code LIKE 'studio-school-%'
+ORDER BY created_at DESC;
+
+-- 6) Users creados por el backfill (teachers + coaches)
+SELECT code, first_name, last_name, role, school_code, created_at
+FROM users
+WHERE code LIKE 'studio-%'
+ORDER BY created_at DESC;
+
+-- 7) UPDATE manual de nombres (cuando staging no tiene la feature de names)
+-- Reemplazá los valores literales con los del Excel para esa fila.
+UPDATE schools
+SET name = 'CENTRO ESCOLAR LA PAZ',
+    department = 'La Paz',
+    district = 'San Miguel Tepezontes',
+    updated_at = NOW()
+WHERE code = 'studio-school-12001';
+
+UPDATE users
+SET first_name = 'ZEPEDA, LOIDA REBECA', last_name = '', updated_at = NOW()
+WHERE code = 'studio-teacher-ZEPEDA-LOIDA-REBECA' AND role = 'teacher';
+```
+
+### BigQuery — lo que el reports backend lee
+
+```sql
+-- 1) Verificar que el ETL migró la sesión a BQ
+SELECT scheduling_app_event_id, school_code, teacher_code, coach_code,
+       pipeline_status, session_status, is_deleted
+FROM `xai-dev-goes.conformed_education_obs_staging.sessions`
+WHERE scheduling_app_event_id = 'studio-row-4';
+
+-- 2) ¿Los nombres llegaron a dim_schools?
+SELECT school_code, school_name, department, district
+FROM `xai-dev-goes.conformed_education_obs_staging.dim_schools`
+WHERE school_code LIKE 'studio-school-%';
+
+-- 3) ¿Y a dim_users? (full_name = CONCAT(first_name, ' ', last_name))
+-- Ojo: el JOIN del reports backend usa la columna `user_code`, no `code`
+SELECT user_code, full_name, role
+FROM `xai-dev-goes.conformed_education_obs_staging.dim_users`
+WHERE user_code LIKE 'studio-%';
+
+-- 4) Simular EXACTAMENTE lo que el backend de reportes ve cuando genera el PDF
+SELECT
+    s.session_id, s.pipeline_status, s.session_status,
+    NULLIF(TRIM(tu.full_name), '') AS teacher_name,
+    NULLIF(TRIM(cu.full_name), '') AS coach_name,
+    sc.school_name, sc.department, sc.district,
+    s.grade, s.section, s.subject, s.shift,
+    ar.status AS analysis_status, ares.overall_score
+FROM `xai-dev-goes.conformed_education_obs_staging.sessions` s
+LEFT JOIN `xai-dev-goes.conformed_education_obs_staging.dim_users` tu ON s.teacher_code = tu.user_code
+LEFT JOIN `xai-dev-goes.conformed_education_obs_staging.dim_users` cu ON s.coach_code = cu.user_code
+LEFT JOIN `xai-dev-goes.conformed_education_obs_staging.dim_schools` sc ON s.school_code = sc.school_code
+LEFT JOIN `xai-dev-goes.conformed_education_obs_staging.analysis_runs` ar ON s.session_id = ar.session_id
+LEFT JOIN `xai-dev-goes.conformed_education_obs_staging.analysis_results` ares ON ar.analysis_run_id = ares.analysis_run_id
+WHERE s.scheduling_app_event_id = 'studio-row-4'
+QUALIFY ROW_NUMBER() OVER (ORDER BY ar.completed_at DESC NULLS LAST) = 1;
+
+-- 5) Resumen agregado del batch (qué % de filas tienen análisis disponible)
+SELECT
+  COUNT(*) AS total_sessions,
+  COUNTIF(ares.overall_score IS NOT NULL) AS with_analysis,
+  COUNTIF(ares.overall_score IS NULL) AS without_analysis
+FROM `xai-dev-goes.conformed_education_obs_staging.sessions` s
+LEFT JOIN `xai-dev-goes.conformed_education_obs_staging.analysis_runs` ar ON s.session_id = ar.session_id
+LEFT JOIN `xai-dev-goes.conformed_education_obs_staging.analysis_results` ares ON ar.analysis_run_id = ares.analysis_run_id
+WHERE s.scheduling_app_event_id LIKE 'studio-row-%';
+
+-- 6) Buscar sesiones con análisis "incompleto" (datos faltantes que harían que el PDF dé 422)
+SELECT s.scheduling_app_event_id, s.pipeline_status, s.session_status,
+       ares.overall_score, ar.status AS analysis_status
+FROM `xai-dev-goes.conformed_education_obs_staging.sessions` s
+LEFT JOIN `xai-dev-goes.conformed_education_obs_staging.analysis_runs` ar ON s.session_id = ar.session_id
+LEFT JOIN `xai-dev-goes.conformed_education_obs_staging.analysis_results` ares ON ar.analysis_run_id = ares.analysis_run_id
+WHERE s.scheduling_app_event_id LIKE 'studio-row-%'
+  AND (ares.overall_score IS NULL OR ares.results_data IS NULL);
+```
+
+### Notas de detalle
+
+- **dim_users.user_code vs users.code**: el ETL renombra `code` → `user_code` en la migración a BigQuery. En consultas a la dim, siempre `user_code`.
+- **dim_users.full_name**: el silver ETL hace `CONCAT(first_name, ' ', last_name)`. Si en operacional dejaste `last_name = ''`, full_name = first_name con un espacio al final (algunas versiones del ETL trimean, otras no).
+- **ETL es horario** (Cloud Scheduler): si UPDATE-aste en Cloud SQL pero la dim aún muestra valores viejos, hay que esperar la próxima corrida del ETL (~1h máximo) o que pidan al equipo xAI dispararlo manualmente.
+- **PDF cacheado en GCS**: el backend de reportes guarda el PDF generado en `gs://ia-observabilidad-docentes-bucket/reports_observability/reporte_sesion_<event_id>.pdf`. Si ya hay un PDF cacheado de una corrida vieja (con em-dashes), borralo para forzar regeneración:
+  ```bash
+  gcloud storage rm gs://ia-observabilidad-docentes-bucket/reports_observability/reporte_sesion_studio-row-4.pdf
+  ```
+
+---
+
 ## Estructura del proyecto
 
 ```

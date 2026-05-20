@@ -33,6 +33,17 @@ def slug(name: str | None) -> str:
     return s or "UNKNOWN"
 
 
+def _clean_str(value) -> str | None:
+    """Return a clean string suitable for the webhook display fields,
+    or None if the value is empty / "Sin dato"."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s or s.lower() == "sin dato":
+        return None
+    return s
+
+
 class Pipeline:
     """Holds long-lived clients shared across rows."""
 
@@ -171,6 +182,10 @@ class Pipeline:
         - codes from slugified names + infrastructureCode (M-4)
         - recorded_at = UTC now (M-2)
         - grade/section/shift/subject directly from the Excel (M-6)
+        - display names (teacher, coach, school, department, district) sent
+          as optional fields; used by xAI feat/webhook-forward-entity-names
+          to populate dim_users/dim_schools so the PDF shows names. Silently
+          ignored if the deployed webhook is on main.
         """
         return build_payload(
             event_id=f"studio-row-{row_position}",
@@ -183,6 +198,11 @@ class Pipeline:
             signed_url=signed_url,
             section=(str(excel_row["section"]) if excel_row.get("section") else None),
             shift=(str(excel_row["shift"]) if excel_row.get("shift") else None),
+            teacher_name=_clean_str(excel_row.get("teacher")),
+            coach_name=_clean_str(excel_row.get("coach")),
+            school_name=_clean_str(excel_row.get("school")),
+            school_department=_clean_str(excel_row.get("department")),
+            school_district=_clean_str(excel_row.get("district")),
         )
 
     # ── Fase 2 ─────────────────────────────────────────────────────────────

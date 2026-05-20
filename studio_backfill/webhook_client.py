@@ -73,6 +73,16 @@ def build_payload(
     section: str | None = None,
     shift: str | None = None,
     lesson_number: int | None = None,
+    # Display names — used by the xAI feature branch
+    # `feat/webhook-forward-entity-names` to backfill dim_users / dim_schools so
+    # the PDF report shows actual names instead of em-dashes. If the deployed
+    # webhook is `main` (without that branch), Pydantic silently drops these
+    # extra fields (`extra="ignore"` default in v2). No-op on the bad case.
+    teacher_name: str | None = None,
+    coach_name: str | None = None,
+    school_name: str | None = None,
+    school_department: str | None = None,
+    school_district: str | None = None,
 ) -> dict:
     """Build the webhook payload per `webhook/src/schemas.py:17-100`."""
     params: dict = {
@@ -90,4 +100,14 @@ def build_payload(
         params["shift"] = shift
     if lesson_number is not None:
         params["lesson_number"] = lesson_number
+    if teacher_name:
+        params["teacher_name"] = teacher_name
+    if coach_name:
+        params["coach_name"] = coach_name
+    if school_name:
+        params["school_name"] = school_name
+    if school_department:
+        params["school_department"] = school_department
+    if school_district:
+        params["school_district"] = school_district
     return {"kwargs": {"signed_url": signed_url, "params": params}}

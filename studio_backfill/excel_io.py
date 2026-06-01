@@ -5,6 +5,8 @@ Post-migration: flat 12-column format (studio_results_final.xlsx).
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from pathlib import Path
 from typing import Iterator
 
@@ -27,6 +29,39 @@ REQUIRED_COLUMNS = [
     "transcriptLink",
 ]
 
+# Alias de encabezados de origen → nombre canónico (REQUIRED_COLUMNS).
+# Las claves se comparan ya normalizadas (sin acentos, minúsculas, espacios
+# colapsados), así que "Código", "Codigo" y distinto casing funcionan igual.
+# Esto permite aceptar la plantilla en español ("Consulta_*.xlsx") sin tocar el
+# archivo; el formato inglés original sigue funcionando por coincidencia directa.
+HEADER_ALIASES = {
+    "codigo de infraestructura": "infrastructureCode",
+    "escuela": "school",
+    "departamento": "department",
+    "distrito": "district",
+    "docente": "teacher",
+    "coach": "coach",
+    "asignatura": "subject",
+    "grado": "grade",
+    "seccion": "section",
+    "turno": "shift",
+    "enlace de video": "videoLink",
+    "enlace de transcripcion": "transcriptLink",
+}
+
+
+def _norm_header(h) -> str:
+    """Normaliza un encabezado: sin acentos, minúsculas, espacios colapsados."""
+    s = unicodedata.normalize("NFKD", str(h or "")).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"\s+", " ", s).strip().lower()
+
+
+def _denumber(v):
+    """11769.0 -> '11769', 4.0 -> '4'; deja intacto lo que no sea float entero."""
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return v
+
 
 def read_rows(excel_path: str) -> Iterator[dict]:
     """Yield each data row as a dict keyed by header, with synthetic `_row_position`.
@@ -38,7 +73,11 @@ def read_rows(excel_path: str) -> Iterator[dict]:
     ws = wb[wb.sheetnames[0]]
 
     rows_iter = ws.iter_rows(values_only=True)
-    header = list(next(rows_iter))
+    raw_header = list(next(rows_iter))
+    # Traducir encabezados (español o inglés) a la forma canónica; las columnas
+    # desconocidas (p. ej. "Observación") conservan su nombre original.
+    alias = {**{_norm_header(c): c for c in REQUIRED_COLUMNS}, **HEADER_ALIASES}
+    header = [alias.get(_norm_header(h), h) for h in raw_header]
     missing = [c for c in REQUIRED_COLUMNS if c not in header]
     if missing:
         raise RuntimeError(f"Excel missing required columns: {missing}")
@@ -49,6 +88,10 @@ def read_rows(excel_path: str) -> Iterator[dict]:
             continue
         position += 1
         row = dict(zip(header, raw))
+        # Normalizar floats de openpyxl (11769.0 -> "11769", 4.0 -> "4").
+        for k in ("infrastructureCode", "grade"):
+            if k in row:
+                row[k] = _denumber(row[k])
         row["_row_position"] = position
         yield row
 

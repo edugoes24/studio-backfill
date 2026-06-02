@@ -221,12 +221,17 @@ class StateStore:
 
     def reset(self) -> None:
         """Drop and recreate tables. Idempotency of the webhook prevents duplicate
-        xAI work, but any local checkpoint will be lost."""
-        with self._tx():
-            self._conn.executescript(
-                "DROP TABLE IF EXISTS rows; DROP TABLE IF EXISTS source_metadata;"
-            )
-            self._conn.executescript(SCHEMA)
+        xAI work, but any local checkpoint will be lost.
+
+        Not wrapped in `_tx()`: `executescript()` issues an implicit COMMIT before
+        running, which closes the manual BEGIN and makes the trailing COMMIT fail
+        with "no transaction is active". The connection is in autocommit mode
+        (isolation_level=None), so the DDL commits on its own.
+        """
+        self._conn.executescript(
+            "DROP TABLE IF EXISTS rows; DROP TABLE IF EXISTS source_metadata;"
+        )
+        self._conn.executescript(SCHEMA)
 
 
 def _file_sha256(path: str) -> str:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -139,6 +140,12 @@ class Pipeline:
 
             # POST webhook (this is the only point where we hit external rate-limited resources)
             payload = self._build_payload(excel_row, row_position, signed_url)
+            # Dump the exact payload for debugging (only with -v / --verbose).
+            log.debug(
+                "webhook payload for %s:\n%s",
+                event_id,
+                json.dumps(payload, indent=2, ensure_ascii=False),
+            )
             try:
                 resp = self.webhook.post(payload)
             except WebhookError as e:

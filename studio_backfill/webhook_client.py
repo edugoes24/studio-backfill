@@ -13,9 +13,12 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import time
 
 import requests
+
+log = logging.getLogger("studio_backfill.webhook")
 
 
 class WebhookError(RuntimeError):
@@ -51,6 +54,15 @@ class WebhookClient:
             "X-Webhook-Signature": self._sign(ts, body),
             "X-Webhook-Timestamp": ts,
         }
+        # Exact request as it goes over the wire (only with -v / --verbose):
+        # `body` is the literal byte payload that gets signed and POSTed.
+        log.debug(
+            "POST %s\n  X-Webhook-Timestamp: %s\n  X-Webhook-Signature: %s\n  body (exact bytes sent): %s",
+            self.url,
+            ts,
+            headers["X-Webhook-Signature"],
+            body.decode("utf-8"),
+        )
         resp = requests.post(self.url, data=body, headers=headers, timeout=self.timeout)
         if not resp.ok:
             raise WebhookError(resp.status_code, resp.text)

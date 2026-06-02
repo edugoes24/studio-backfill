@@ -137,6 +137,7 @@ class Pipeline:
                 state.increment_attempts(event_id)
                 return False
             state.update(event_id, transcript_gcs_uri=gcs_uri, state="transcript_uploaded")
+            log.debug("signed_url for %s: %s", event_id, signed_url)
 
             # POST webhook (this is the only point where we hit external rate-limited resources)
             payload = self._build_payload(excel_row, row_position, signed_url)

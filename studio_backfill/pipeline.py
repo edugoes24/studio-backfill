@@ -60,6 +60,12 @@ class Pipeline:
         self.reports = ReportsClient(settings.reports_url)
         self.drive_writer = DriveWriter(settings.sa_key_path, settings.shared_drive_id)
 
+    def _event_id(self, row_position: int) -> str:
+        """Build the cross-system event_id. The prefix is configurable via
+        EVENT_ID_PREFIX (default 'studio-row') so a re-run can use fresh ids
+        (e.g. 'studio-row-v2') that xAI treats as new sessions."""
+        return f"{self.settings.event_id_prefix}-{row_position}"
+
     # ── Fase 1 ─────────────────────────────────────────────────────────────
     def submit_row(self, state: StateStore, excel_row: dict) -> bool:
         """Execute Phase 1 for a single row. Idempotent: skips already-submitted.
@@ -69,8 +75,8 @@ class Pipeline:
         submit_all uses this to throttle only on real webhook calls.
         """
         row_position = int(excel_row["_row_position"])
-        event_id = f"studio-row-{row_position}"
-        state.upsert_pending(row_position, excel_row)
+        event_id = self._event_id(row_position)
+        state.upsert_pending(row_position, event_id, excel_row)
 
         if state.is_completed_or_submitted(event_id):
             log.info("skip already-submitted event_id=%s", event_id)
@@ -188,7 +194,7 @@ class Pipeline:
           ignored if the deployed webhook is on main.
         """
         return build_payload(
-            event_id=f"studio-row-{row_position}",
+            event_id=self._event_id(row_position),
             teacher_code=f"studio-teacher-{slug(excel_row.get('teacher'))}",
             coach_code=f"studio-tutor-{slug(excel_row.get('coach'))}",
             school_code=f"studio-school-{excel_row.get('infrastructureCode')}",

@@ -67,6 +67,7 @@ class Settings:
     excel_path: str
     state_db_path: str
     default_grade: str
+    event_id_prefix: str
 
     @classmethod
     def load(cls) -> "Settings":
@@ -87,6 +88,7 @@ class Settings:
             excel_path=_require("EXCEL_PATH"),
             state_db_path=_require("STATE_DB_PATH"),
             default_grade=_optional("DEFAULT_GRADE", "No informado"),
+            event_id_prefix=_optional("EVENT_ID_PREFIX", "studio-row"),
         )
 
     @classmethod

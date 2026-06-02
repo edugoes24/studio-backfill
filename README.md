@@ -194,6 +194,7 @@ Vive en el root del repo (gitignored). Variables relevantes:
 | `POLL_INTERVAL_SECONDS` | 900 | Cada cuánto re-chequea Phase 2 en loop continuo |
 | `MAX_ATTEMPTS` | 5 | Reintentos automáticos antes de dar por perdida una fila |
 | `GCS_SIGNED_URL_TTL_SECONDS` | 21600 | TTL del signed URL del transcript (6h cubre retries de Pub/Sub) |
+| `EVENT_ID_PREFIX` | `studio-row` | Prefijo del `event_id` (`<prefijo>-<fila>`). Cámbialo (ej. `studio-row-v2`) para forzar reproceso: xAI trata un `event_id` nuevo como sesión nueva |
 
 Después de tocar el `.env_backfill`, el siguiente comando lo lee automático
 (no hace falta reiniciar nada).

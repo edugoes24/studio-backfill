@@ -134,9 +134,12 @@ class StateStore:
             )
 
     # ── Row CRUD ───────────────────────────────────────────────────────────
-    def upsert_pending(self, row_position: int, excel_row: dict) -> None:
-        """Insert a row in 'pending' state if not present. Idempotent."""
-        event_id = f"studio-row-{row_position}"
+    def upsert_pending(self, row_position: int, event_id: str, excel_row: dict) -> None:
+        """Insert a row in 'pending' state if not present. Idempotent.
+
+        `event_id` is built by the caller (Pipeline._event_id) so the prefix
+        stays configurable in a single place.
+        """
         with self._tx():
             self._conn.execute(
                 "INSERT OR IGNORE INTO rows (row_position, event_id, state, excel_row_json) "

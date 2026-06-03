@@ -1,0 +1,100 @@
+{
+  "info": {
+    "name": "xAI Webhook — studio-backfill",
+    "description": "Dispara manualmente el webhook de xAI (POST /webhook) con un payload firmado por HMAC, igual que studio_backfill/webhook_client.py. Útil para debug y pruebas de carga. La firma se calcula en un pre-request script; solo tienes que rellenar las variables (sobre todo `signed_url`, `webhook_url` y `webhook_secret`).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "POST /webhook (transcript processing)",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "// Firma HMAC-SHA256 idéntica a webhook_client.py:",
+              "//   signing_string = `${timestamp}.${body}`  (body = bytes EXACTOS enviados)",
+              "//   signature      = HMAC_SHA256(secret, signing_string) en hex",
+              "//   header         = `sha256=${signature}`",
+              "//",
+              "// IMPORTANTE: recorded_at se fija aquí como variable normal (no {{$isoTimestamp}})",
+              "// para que el valor firmado sea el mismo que se envía. Las variables dinámicas",
+              "// {{$...}} se resolverían dos veces (firma vs envío) y la firma no cuadraría -> 401.",
+              "",
+              "// ── Secreto HMAC ──",
+              "// Opción A (recomendada): ponlo en la variable de colección `webhook_secret` (Current Value).",
+              "// Opción B (rápida para pruebas): pégalo aquí en SECRET_RAW. NO subas el secreto al repo.",
+              "const SECRET_RAW = '';   // <-- pega el secreto aquí si no usas la variable",
+              "const secret = SECRET_RAW || pm.variables.get('webhook_secret');",
+              "if (!secret) { throw new Error('Falta el secreto: pégalo en SECRET_RAW (pre-request) o en la variable webhook_secret (Current Value).'); }",
+              "if (!pm.variables.get('webhook_url')) { throw new Error('Falta webhook_url en Variables > Current Value.'); }",
+              "if (!pm.request.body || !pm.request.body.raw) { throw new Error('El body está vacío.'); }",
+              "",
+              "if (!pm.variables.get('recorded_at')) {",
+              "    pm.variables.set('recorded_at', new Date().toISOString().replace(/\\.\\d{3}Z$/, '+00:00'));",
+              "}",
+              "",
+              "const ts = Math.floor(Date.now() / 1000).toString();",
+              "",
+              "// Resuelve {{variables}} del body para firmar EXACTAMENTE lo que Postman enviará.",
+              "const body = pm.variables.replaceIn(pm.request.body.raw);",
+              "",
+              "const signature = CryptoJS.HmacSHA256(ts + '.' + body, secret).toString(CryptoJS.enc.Hex);",
+              "",
+              "pm.request.headers.upsert({ key: 'X-Webhook-Timestamp', value: ts });",
+              "pm.request.headers.upsert({ key: 'X-Webhook-Signature', value: 'sha256=' + signature });",
+              "",
+              "console.log('body firmado/enviado:', body);",
+              "console.log('X-Webhook-Timestamp:', ts);"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('202 Accepted', function () {",
+              "    pm.expect(pm.response.code).to.eql(202);",
+              "});",
+              "try {",
+              "    const j = pm.response.json();",
+              "    if (j.message_id) pm.collectionVariables.set('last_message_id', j.message_id);",
+              "    console.log('event_id:', j.event_id, '| message_id:', j.message_id);",
+              "} catch (e) { console.log('respuesta no-JSON:', pm.response.text()); }"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": { "raw": "{{webhook_url}}", "host": ["{{webhook_url}}"] },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"kwargs\": {\n    \"signed_url\": \"{{signed_url}}\",\n    \"params\": {\n      \"event_id\": \"{{event_id}}\",\n      \"teacher_code\": \"{{teacher_code}}\",\n      \"coach_code\": \"{{coach_code}}\",\n      \"school_code\": \"{{school_code}}\",\n      \"grade\": \"{{grade}}\",\n      \"subject\": \"{{subject}}\",\n      \"recorded_at\": \"{{recorded_at}}\",\n      \"section\": \"{{section}}\",\n      \"shift\": \"{{shift}}\"\n    }\n  }\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "description": "El pre-request script agrega los headers X-Webhook-Timestamp y X-Webhook-Signature. Rellena las variables de la colección antes de enviar."
+      }
+    }
+  ],
+  "variable": [
+    { "key": "webhook_url", "value": "", "description": "URL completa del webhook (incluye /webhook). De Secret Manager: class-observability-backend-function-webhook-url" },
+    { "key": "webhook_secret", "value": "", "type": "secret", "description": "Secreto HMAC. De Secret Manager: class-observability-backend-function-webhook-secret" },
+    { "key": "signed_url", "value": "", "description": "Signed URL (v4) de un transcript en el bucket. Ver postman/README.md para generarla." },
+    { "key": "event_id", "value": "loadtest-0001", "description": "Clave de idempotencia. Usa uno NUEVO cada vez para forzar reproceso." },
+    { "key": "teacher_code", "value": "studio-teacher-TEST" },
+    { "key": "coach_code", "value": "studio-tutor-TEST" },
+    { "key": "school_code", "value": "studio-school-1" },
+    { "key": "grade", "value": "4" },
+    { "key": "subject", "value": "Lenguaje" },
+    { "key": "section", "value": "A" },
+    { "key": "shift", "value": "Matutino" },
+    { "key": "recorded_at", "value": "", "description": "Se rellena solo en el pre-request si está vacío (ISO-8601 UTC)." },
+    { "key": "last_message_id", "value": "", "description": "Lo guarda el test script tras un 202." }
+  ]
+}

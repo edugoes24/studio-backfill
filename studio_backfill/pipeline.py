@@ -68,7 +68,7 @@ class Pipeline:
         return f"{self.settings.event_id_prefix}-{row_position}"
 
     # ── Fase 1 ─────────────────────────────────────────────────────────────
-    def submit_row(self, state: StateStore, excel_row: dict) -> bool:
+    def submit_row(self, state: StateStore, excel_row: dict, post_webhook: bool = True) -> bool:
         """Execute Phase 1 for a single row. Idempotent: skips already-submitted.
 
         Returns True if a webhook POST was actually attempted (success or fail),
@@ -139,6 +139,13 @@ class Pipeline:
             state.update(event_id, transcript_gcs_uri=gcs_uri, state="transcript_uploaded")
             log.debug("signed_url for %s: %s", event_id, signed_url)
 
+            # Upload-only mode: stop here. Populates the GCS bucket without posting
+            # to the webhook, so we don't create xAI sessions nor load the backend.
+            # The row rests in 'transcript_uploaded'.
+            if not post_webhook:
+                log.info("upload-only: %s en GCS (sin POST al webhook)", event_id)
+                return False
+
             # POST webhook (this is the only point where we hit external rate-limited resources)
             payload = self._build_payload(excel_row, row_position, signed_url)
             # Dump the exact payload for debugging (only with -v / --verbose).
@@ -171,9 +178,12 @@ class Pipeline:
             state.increment_attempts(event_id)
             return False  # unknown if webhook was attempted; conservative: don't throttle
 
-    def submit_all(self, state: StateStore, excel_rows: Iterable[dict]) -> None:
+    def submit_all(self, state: StateStore, excel_rows: Iterable[dict], post_webhook: bool = True) -> None:
         """Run Phase 1 for all rows. Throttle applies ONLY to rows that hit
         the webhook (skipped rows pass through instantly).
+
+        With post_webhook=False (upload-only), no row hits the webhook, so the
+        throttle never engages and the run goes as fast as Drive/GCS allow.
         """
         delay = 1.0 / max(self.settings.webhook_rps, 0.0001)
         last_webhook = 0.0
@@ -185,7 +195,7 @@ class Pipeline:
                 if wait > 0:
                     time.sleep(wait)
 
-            did_post = self.submit_row(state, row)
+            did_post = self.submit_row(state, row, post_webhook=post_webhook)
             if did_post:
                 last_webhook = time.monotonic()
 

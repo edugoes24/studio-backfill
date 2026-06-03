@@ -2,7 +2,7 @@
 
 Subcommands:
   find-pilot-rows                scan Excel and sample candidates per case
-  pilot --rows <ids> | --range <a-b> | --all     phase 1 (encolar)
+  pilot --rows <ids> | --range <a-b> | --all [--no-webhook]   phase 1 (encolar)
   collect [--once]               phase 2 (recoger PDFs)
   write-excel [--out PATH]       phase 3 (Excel de salida)
   status                         resumen por estado
@@ -158,9 +158,10 @@ def cmd_pilot(args, settings: Settings, state: StateStore) -> int:
         log.error("specify --rows ROW_POSITIONS, --range START-END, --all, or --retry-failed")
         return 2
 
-    log.info("phase 1: %d rows to process at %.2f RPS", len(excel_rows), settings.webhook_rps)
+    mode = "upload-only (no webhook)" if args.no_webhook else f"{settings.webhook_rps:.2f} RPS"
+    log.info("phase 1: %d rows to process [%s]", len(excel_rows), mode)
     pipeline = Pipeline(settings)
-    pipeline.submit_all(state, excel_rows)
+    pipeline.submit_all(state, excel_rows, post_webhook=not args.no_webhook)
     state.mark_phase_1_finished()
     log.info("phase 1 done. summary: %s", state.status_summary())
     return 0
@@ -300,6 +301,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="inclusive row range, 1-indexed, e.g. 1-1300")
     g.add_argument("--all", action="store_true")
     g.add_argument("--retry-failed", action="store_true")
+    sp_pilot.add_argument(
+        "--no-webhook", action="store_true",
+        help="upload transcripts to GCS WITHOUT posting to the webhook (populate only)",
+    )
     sp_pilot.set_defaults(func=cmd_pilot)
 
     sp_collect = sub.add_parser("collect")

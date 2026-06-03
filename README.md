@@ -58,6 +58,11 @@ python3 -m studio_backfill.cli pilot --rows 4,66,505,9,35,1046,298,1
 # Un rango de filas (1-indexed, inclusivo) — útil para cargas grandes
 python3 -m studio_backfill.cli pilot --range 1-1300
 
+# Solo SUBIR los transcripts a GCS, SIN postear al webhook (poblar el bucket
+# sin crear sesiones en xAI ni cargar su backend). Las filas quedan en
+# 'transcript_uploaded'. Ideal para preparar datos de pruebas de carga.
+python3 -m studio_backfill.cli pilot --range 1-1300 --no-webhook
+
 # Todas las filas del Excel (toma horas; corré dentro de tmux)
 python3 -m studio_backfill.cli pilot --all
 

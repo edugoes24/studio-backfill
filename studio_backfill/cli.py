@@ -2,7 +2,7 @@
 
 Subcommands:
   find-pilot-rows                scan Excel and sample candidates per case
-  pilot --rows <ids> | --all     phase 1 (encolar)
+  pilot --rows <ids> | --range <a-b> | --all     phase 1 (encolar)
   collect [--once]               phase 2 (recoger PDFs)
   write-excel [--out PATH]       phase 3 (Excel de salida)
   status                         resumen por estado
@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -140,8 +141,21 @@ def cmd_pilot(args, settings: Settings, state: StateStore) -> int:
         seen = {int(r["_row_position"]) for r in excel_rows}
         for missing in wanted_positions - seen:
             log.warning("row_position %d not in Excel — skipping", missing)
+    elif args.range:
+        m = re.match(r"^\s*(\d+)\s*-\s*(\d+)\s*$", args.range)
+        if not m:
+            log.error("--range debe ser START-END (1-indexed, inclusivo), ej. 1-1300")
+            return 2
+        start, end = int(m.group(1)), int(m.group(2))
+        if start > end:
+            start, end = end, start
+        excel_rows = [
+            r for r in excel_io.read_rows(settings.excel_path)
+            if start <= int(r["_row_position"]) <= end
+        ]
+        log.info("range %d-%d -> %d rows in Excel", start, end, len(excel_rows))
     else:
-        log.error("specify --rows ROW_POSITIONS, --all, or --retry-failed")
+        log.error("specify --rows ROW_POSITIONS, --range START-END, --all, or --retry-failed")
         return 2
 
     log.info("phase 1: %d rows to process at %.2f RPS", len(excel_rows), settings.webhook_rps)
@@ -282,6 +296,8 @@ def main(argv: list[str] | None = None) -> int:
     sp_pilot = sub.add_parser("pilot")
     g = sp_pilot.add_mutually_exclusive_group()
     g.add_argument("--rows", type=str, help="comma-separated row positions (1-indexed)")
+    g.add_argument("--range", type=str, metavar="START-END",
+                   help="inclusive row range, 1-indexed, e.g. 1-1300")
     g.add_argument("--all", action="store_true")
     g.add_argument("--retry-failed", action="store_true")
     sp_pilot.set_defaults(func=cmd_pilot)

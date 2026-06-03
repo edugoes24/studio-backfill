@@ -55,6 +55,9 @@ python3 -m studio_backfill.cli pilot --rows 4
 # Varias filas específicas
 python3 -m studio_backfill.cli pilot --rows 4,66,505,9,35,1046,298,1
 
+# Un rango de filas (1-indexed, inclusivo) — útil para cargas grandes
+python3 -m studio_backfill.cli pilot --range 1-1300
+
 # Todas las filas del Excel (toma horas; corré dentro de tmux)
 python3 -m studio_backfill.cli pilot --all
 
@@ -194,6 +197,7 @@ Vive en el root del repo (gitignored). Variables relevantes:
 | `POLL_INTERVAL_SECONDS` | 900 | Cada cuánto re-chequea Phase 2 en loop continuo |
 | `MAX_ATTEMPTS` | 5 | Reintentos automáticos antes de dar por perdida una fila |
 | `GCS_SIGNED_URL_TTL_SECONDS` | 21600 | TTL del signed URL del transcript (6h cubre retries de Pub/Sub) |
+| `GCS_BUCKET_PREFIX` | `studio-backfill` | Carpeta raíz en el bucket. La ruta del transcript es `<GCS_BUCKET_PREFIX>/<event_id>/transcript.<ext>` |
 | `EVENT_ID_PREFIX` | `studio-row` | Prefijo del `event_id` (`<prefijo>-<fila>`). Cámbialo (ej. `studio-row-v2`) para forzar reproceso: xAI trata un `event_id` nuevo como sesión nueva |
 
 Después de tocar el `.env_backfill`, el siguiente comando lo lee automático
